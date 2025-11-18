@@ -1,6 +1,22 @@
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import argparse
 
-model_name = "./clowncar-moe-2x600m"
+# Create the parser
+parser = argparse.ArgumentParser(description="Run inference with a specified model.")
+
+# Add the model_name argument
+parser.add_argument(
+    "--model_name",
+    type=str,
+    default="./clowncar-moe-2x600m",
+    help="The name or path of the model to use for inference.",
+)
+
+# Parse arguments
+args = parser.parse_args()
+
+# Use the model_name from arguments
+model_name = args.model_name
 
 # load the tokenizer and the model
 tokenizer = AutoTokenizer.from_pretrained(model_name)
