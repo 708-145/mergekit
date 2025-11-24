@@ -7,6 +7,7 @@ import time
 from typing import Any
 import gc
 import yaml
+import json
 
 import torch
 from tqdm import tqdm
@@ -38,6 +39,33 @@ import shutil
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def save_observer_data_to_disk(observer_data, output_path: pathlib.Path):
+    """Save observer data to disk in JSON format."""
+    # Convert torch tensors to lists for JSON serialization
+    def convert_tensors_to_lists(data):
+        if isinstance(data, dict):
+            return {k: convert_tensors_to_lists(v) for k, v in data.items()}
+        elif isinstance(data, list):
+            return [convert_tensors_to_lists(i) for i in data]
+        elif isinstance(data, torch.Tensor):
+            return data.tolist()
+        else:
+            return data
+    
+    serializable_data = convert_tensors_to_lists(observer_data)
+    
+    with open(output_path, "w") as f:
+        json.dump(serializable_data, f, indent=2)
+    logger.info(f"Observer data saved to {output_path}")
+
+
+def load_observer_data_from_disk(observer_data_path: pathlib.Path):
+    """Load observer data from disk in JSON format."""
+    with open(observer_data_path, "r") as f:
+        observer_data = json.load(f)
+    return observer_data
 
 
 def dump_args_to_yaml(
@@ -88,9 +116,7 @@ def prune(
     n_experts_to_prune,
     pruned_model_dir,
 ):
-    """
-    Prune the model based on the observer data and clustering.
-    """
+    """Prune the model based on the observer data and clustering."""
     model_attrs = MODEL_ATTRS[model.__class__.__name__]
 
     for layer in observer_data:
@@ -189,7 +215,7 @@ def prune(
     logger.info("Saving pruned model...")
     retained_experts = len(retained_expert_indicies)
     setattr(model.config, model_attrs["num_experts"], retained_experts)
-    if model.__class__.__name__ == "Ernie4_5_MoeForCausalLM":  # remote-code verson
+    if model.__class__.__name__ == "Ernie4_5_MoEForCausalLM":  # remote-code verson
         model.config.moe_capacity = [
             retained_experts,
             retained_experts,
@@ -260,20 +286,30 @@ def main():
         trust_remote_code=True,
         local_files_only=True,
     )
-    # record activations or load previously recorded activations
-    logger.info(
-        f"Running observer to collect activation data for model {model_args.model_name} on dataset {ds_args.dataset_name}."
-    )
-    observer_data = record_activations(
-        model,
-        tokenizer,
-        reap_args,
-        model_args,
-        ds_args,
-        obs_args,
-        results_dir,
-    )
+    
+    # Check if we should load observer data from disk
+    if prune_args.load_observer_data_from_disk:
+        logger.info("Loading observer data from disk...")
+        observer_data = load_observer_data_from_disk(prune_args.load_observer_data_from_disk)
+    else:
+        # record activations or load previously recorded activations
+        logger.info(
+            f"Running observer to collect activation data for model {model_args.model_name} on dataset {ds_args.dataset_name}."
+        )
+        observer_data = record_activations(
+            model,
+            tokenizer,
+            reap_args,
+            model_args,
+            ds_args,
+            obs_args,
+            results_dir,
+        )
+    
     if reap_args.run_observer_only:
+        # Save observer data to disk if specified
+        if prune_args.save_observer_data_to_disk:
+            save_observer_data_to_disk(observer_data, prune_args.save_observer_data_to_disk)
         logger.info(
             "Observer run completed. Exiting after collecting activation data since "
             "`run_observer_only` is set to True."
