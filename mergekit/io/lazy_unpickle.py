@@ -11,16 +11,26 @@ import zipfile
 from functools import reduce
 from typing import Any, Optional, Tuple, Union
 
-import accelerate
 import numpy
 import torch
 from pydantic import BaseModel, PrivateAttr
 
+try:
+    # NumPy 2.0+ compatibility
+    from numpy.lib.format import dtype_to_descr
+    numpy_scalar = numpy.generic
+except (ImportError, AttributeError):
+    try:
+        numpy_scalar = numpy.core.multiarray.scalar
+    except AttributeError:
+        # Fallback or mock if completely missing/changed
+        numpy_scalar = numpy.generic
+
 ACCEPTABLE_TYPES = {
     ("torch._utils", "_rebuild_tensor_v2"): torch._utils._rebuild_tensor_v2,
     ("collections", "OrderedDict"): collections.OrderedDict,
-    ("numpy.core.multiarray", "scalar"): numpy.core.multiarray.scalar,
-    ("numpy", "dtype"): numpy.core.multiarray.scalar,
+    ("numpy.core.multiarray", "scalar"): numpy_scalar,
+    ("numpy", "dtype"): numpy_scalar,
     ("_codecs", "encode"): codecs.encode,
     **{
         ("torch", name): getattr(torch, name)
@@ -169,7 +179,13 @@ def torch_lazy_load():
         pickle.load = load_monkeypatch
         torch._utils._rebuild_tensor = DeferredLoad.rebuild
 
-        with accelerate.init_empty_weights():
+        try:
+            import accelerate
+            ctx = accelerate.init_empty_weights()
+        except (ImportError, AttributeError):
+            ctx = contextlib.nullcontext()
+
+        with ctx:
             yield
 
     finally:
