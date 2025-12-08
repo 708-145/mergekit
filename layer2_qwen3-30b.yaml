@@ -1,0 +1,7 @@
+slices:
+  - sources:
+    - model: qwen30b
+      layer_range: [0, 2] # or a range that only includes the first and last transformer block index
+    
+merge_method: passthrough # Use passthrough since you are taking layers from a single model
+

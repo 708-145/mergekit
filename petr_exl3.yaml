@@ -1,0 +1,16 @@
+base_model: qwen0.6b-6.0bpw
+gate_mode: cheap_embed
+dtype: bfloat16
+experts_per_token: 1
+experts:
+  - source_model: qwen0.6b-6.0bpw
+    positive_prompts:
+      - "complex"
+    negative_prompts:
+      - "simple and easy"
+  - source_model: qwen0.6b-2.75bpw
+    positive_prompts:
+      - "simple"
+    negative_prompts:
+      - "complex and difficult"
+
