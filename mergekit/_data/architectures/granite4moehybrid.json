@@ -35,13 +35,16 @@
                 "name": "model.layers.${layer_index}.shared_mlp.output_linear.weight"
             },
             {
-                "name": "model.layers.${layer_index}.block_sparse_moe.input_linear.weight"
+                "name": "model.layers.${layer_index}.block_sparse_moe.input_linear.weight",
+                "optional": true
             },
             {
-                "name": "model.layers.${layer_index}.block_sparse_moe.router.layer.weight"
+                "name": "model.layers.${layer_index}.block_sparse_moe.router.layer.weight",
+                "optional": true
             },
             {
-                "name": "model.layers.${layer_index}.block_sparse_moe.output_linear.weight"
+                "name": "model.layers.${layer_index}.block_sparse_moe.output_linear.weight",
+                "optional": true
             },
             {
                 "name": "model.layers.${layer_index}.post_attention_layernorm.weight"
