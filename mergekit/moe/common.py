@@ -89,6 +89,33 @@ def copy_tensor_out(
     except KeyError:
         tensor = None
     if tensor is None:
+        # Check for suffixed keys (e.g. exl2/3 weights)
+        candidates = [weight_info.name] + aliases
+        found_suffixed = False
+        for candidate in candidates:
+            prefix = candidate + "."
+            suffixed_keys = [
+                k for k in loader.index.tensor_paths if k.startswith(prefix)
+            ]
+            if suffixed_keys:
+                found_suffixed = True
+                for key in suffixed_keys:
+                    suffix = key[len(candidate) :]
+                    try:
+                        sub_tensor = loader.get_tensor(key)
+                        sub_out_name = out_tensor_name + suffix
+                        writer.save_tensor(
+                            sub_out_name,
+                            sub_tensor,
+                            clone=clone,
+                        )
+                    except KeyError:
+                        continue
+                break
+
+        if found_suffixed:
+            return
+
         if weight_info.optional:
             return
         logging.error(f"Missing weight: {weight_info.name} / {out_tensor_name}")
