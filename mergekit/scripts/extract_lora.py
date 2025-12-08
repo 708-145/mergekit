@@ -98,6 +98,13 @@ LOG = logging.getLogger("extract_lora")
     help="Skip saving undecomposable modules",
     default=False,
 )
+@click.option(
+    "--decompose-full",
+    "decompose_full",
+    type=str,
+    multiple=True,
+    help="Decompose the specified module(s) into full rank A and B matrices",
+)
 @add_merge_options
 def main(
     base_model: str,
@@ -111,12 +118,15 @@ def main(
     include_regexes: List[str],
     sv_epsilon: float,
     skip_undecomposable: bool,
+    decompose_full: List[str],
     merge_options: MergeOptions,
 ):
     merge_options.apply_global_options()
 
     if not modules_to_save:
         modules_to_save = []
+    if not decompose_full:
+        decompose_full = []
 
     base_model_ref = ModelReference.model_validate(base_model)
     model_ref = ModelReference.model_validate(model)
@@ -132,6 +142,7 @@ def main(
             lora_merge_dtype=merge_options.lora_merge_dtype,
         ),
         modules_to_save=modules_to_save,
+        decompose_full=decompose_full,
         out_path=out_path,
         options=merge_options,
         max_rank=max_rank,
@@ -358,6 +369,7 @@ def plan_extraction(
     include_regexes: Optional[List[str]] = None,
     sv_epsilon: float = 0,
     skip_undecomposable: bool = False,
+    decompose_full: List[str] = [],
 ) -> PlanResults:
     targets = []
     writer_task = TensorWriterTask(
@@ -434,7 +446,14 @@ def plan_extraction(
             targets.extend(plan_module_to_save(model_ref, writer_task, wi, bias_wi))
         elif _should_extract(name):
             if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Embedding)):
-                LOG.info(f"Planning LoRA extraction for {name}")
+                module_max_rank = max_rank
+                key = name.split(".")[-1]
+                if name in decompose_full or key in decompose_full:
+                    module_max_rank = 1000000000
+                    LOG.info(f"Planning full-rank decomposition for {name}")
+                else:
+                    LOG.info(f"Planning LoRA extraction for {name}")
+
                 targets.extend(
                     plan_lora_module(
                         base_model_ref,
@@ -442,7 +461,7 @@ def plan_extraction(
                         wi,
                         bias_wi,
                         writer_task,
-                        max_rank,
+                        module_max_rank,
                         distribute_scale,
                         transpose=isinstance(module, nn.Embedding),
                         sv_epsilon=sv_epsilon,
