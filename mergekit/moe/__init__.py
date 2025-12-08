@@ -20,6 +20,13 @@ except ImportError:
 else:
     ALL_OUTPUT_ARCHITECTURES.append(Qwen3MoE())
 
+try:
+    from mergekit.moe.granite4 import Granite4MoE
+except ImportError:
+    pass
+else:
+    ALL_OUTPUT_ARCHITECTURES.append(Granite4MoE())
+
 __all__ = [
     "ALL_OUTPUT_ARCHITECTURES",
     "MoEOutputArchitecture",

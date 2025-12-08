@@ -168,7 +168,10 @@ def __merge_method(
     tt_fields["execute"] = _execute
 
     tt_name = f"{name.title().replace(' ', '')}MergeTask"
-    tt_cls = pydantic.create_model(tt_name, __base__=Task[torch.Tensor], **tt_fields)
+    model_config = {"arbitrary_types_allowed": True}
+    tt_cls = pydantic.create_model(
+        tt_name, __base__=Task[torch.Tensor], __config__=model_config, **tt_fields
+    )
 
     mm_fields = {}
 
