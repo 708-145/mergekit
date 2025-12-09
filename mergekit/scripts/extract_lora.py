@@ -108,6 +108,12 @@ LOG = logging.getLogger("extract_lora")
     flag_value="ALL",
     help="Decompose the specified module(s) into full rank A and B matrices",
 )
+@click.option(
+    "--full-model-output/--no-full-model-output",
+    is_flag=True,
+    default=False,
+    help="Output a complete model with decomposed weights instead of an adapter",
+)
 @add_merge_options
 def main(
     base_model: Optional[str],
@@ -122,6 +128,7 @@ def main(
     sv_epsilon: float,
     skip_undecomposable: bool,
     decompose_full: List[str],
+    full_model_output: bool,
     merge_options: MergeOptions,
 ):
     merge_options.apply_global_options()
@@ -170,6 +177,7 @@ def main(
         include_regexes=include_regexes,
         sv_epsilon=sv_epsilon,
         skip_undecomposable=skip_undecomposable,
+        full_model_output=full_model_output,
     )
 
     tasks = plan_result.tasks
@@ -193,34 +201,48 @@ def main(
                 0
             ].shape[0]
 
-    real_max_rank = max(module_real_ranks.values()) if module_real_ranks else max_rank
-    config_dict = make_config_dict(
-        base_ref=base_model_ref,
-        model_ref=model_ref,
-        max_rank=real_max_rank,
-        modules_to_save=modules_to_save,
-        target_modules=list(
-            set(key.split(".")[-1] for key in module_real_ranks.keys())
-        ),
-        module_ranks=module_real_ranks,
-    )
-    with open(os.path.join(out_path, "adapter_config.json"), "w") as f:
-        json.dump(config_dict, f, indent=4)
-
-    invocation = " ".join(sys.argv)
-    with open(os.path.join(out_path, "README.md"), "w", encoding="utf-8") as f:
-        f.write(
-            generate_card_lora(
-                base_model_ref or model_ref,
-                model_ref,
-                invocation,
-                os.path.basename(out_path),
-                base_vocab_size=plan_result.base_vocab_size,
-                final_vocab_size=plan_result.final_vocab_size,
-            )
+    if not full_model_output:
+        real_max_rank = max(module_real_ranks.values()) if module_real_ranks else max_rank
+        config_dict = make_config_dict(
+            base_ref=base_model_ref,
+            model_ref=model_ref,
+            max_rank=real_max_rank,
+            modules_to_save=modules_to_save,
+            target_modules=list(
+                set(key.split(".")[-1] for key in module_real_ranks.keys())
+            ),
+            module_ranks=module_real_ranks,
         )
+        with open(os.path.join(out_path, "adapter_config.json"), "w") as f:
+            json.dump(config_dict, f, indent=4)
 
-    LOG.info(f"LoRA adapter extracted to {out_path}")
+        invocation = " ".join(sys.argv)
+        with open(os.path.join(out_path, "README.md"), "w", encoding="utf-8") as f:
+            f.write(
+                generate_card_lora(
+                    base_model_ref or model_ref,
+                    model_ref,
+                    invocation,
+                    os.path.basename(out_path),
+                    base_vocab_size=plan_result.base_vocab_size,
+                    final_vocab_size=plan_result.final_vocab_size,
+                )
+            )
+
+        LOG.info(f"LoRA adapter extracted to {out_path}")
+    else:
+        # Copy non-weight files from the model directory
+        import shutil
+        model_path = model_ref.model.path
+        if os.path.isdir(model_path):
+            for filename in os.listdir(model_path):
+                if filename.lower().endswith((".safetensors", ".bin", ".pt")):
+                    continue
+                src = os.path.join(model_path, filename)
+                dst = os.path.join(out_path, filename)
+                if os.path.isfile(src):
+                     shutil.copy2(src, dst)
+        LOG.info(f"Full decomposed model extracted to {out_path}")
 
 
 def make_config_dict(
@@ -318,6 +340,7 @@ class LoRAModuleSaveTask(Task):
     writer_task: TensorWriterTask
     model_ref: ModelReference
     decomposition_task: TaskVectorDecompositionTask
+    full_model_output: bool = False
 
     def arguments(self) -> Dict[str, Any]:
         return {"writer": self.writer_task, "decomp": self.decomposition_task}
@@ -334,12 +357,19 @@ class LoRAModuleSaveTask(Task):
             return
         lora_type = "lora_embedding" if self.decomposition_task.transpose else "lora"
         lora_suffix = ".weight" if not self.decomposition_task.transpose else ""
-        base_name = self.weight_info.name.removesuffix(".weight")
+        
+        if self.full_model_output:
+            base_name = self.weight_info.name.removesuffix(".weight")
+            prefix = f"{base_name}."
+        else:
+            base_name = self.weight_info.name.removesuffix(".weight")
+            prefix = f"base_model.model.{base_name}."
+
         writer.save_tensor(
-            f"base_model.model.{base_name}.{lora_type}_A{lora_suffix}", weight_a
+            f"{prefix}{lora_type}_A{lora_suffix}", weight_a
         )
         writer.save_tensor(
-            f"base_model.model.{base_name}.{lora_type}_B{lora_suffix}", weight_b
+            f"{prefix}{lora_type}_B{lora_suffix}", weight_b
         )
 
     def priority(self) -> int:
@@ -394,12 +424,13 @@ def plan_extraction(
     sv_epsilon: float = 0,
     skip_undecomposable: bool = False,
     decompose_full: List[str] = [],
+    full_model_output: bool = False,
 ) -> PlanResults:
     targets = []
     writer_task = TensorWriterTask(
         out_path=out_path,
-        override_basename="adapter_model",
-        max_shard_size=-1,
+        override_basename="model" if full_model_output else "adapter_model",
+        max_shard_size=options.out_shard_size if full_model_output else -1,
         safe_serialization=options.safe_serialization,
         use_async=options.async_write,
         max_write_threads=options.write_threads,
@@ -472,7 +503,7 @@ def plan_extraction(
 
         if name in modules_to_save or (name.split(".")[-1] in modules_to_save):
             LOG.info(f"Planning to save {name} at full rank")
-            targets.extend(plan_module_to_save(model_ref, writer_task, wi, bias_wi))
+            targets.extend(plan_module_to_save(model_ref, writer_task, wi, bias_wi, full_model_output))
         elif _should_extract(name):
             if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Embedding)):
                 module_max_rank = max_rank
@@ -494,6 +525,7 @@ def plan_extraction(
                         distribute_scale,
                         transpose=isinstance(module, nn.Embedding),
                         sv_epsilon=sv_epsilon,
+                        full_model_output=full_model_output,
                     )
                 )
             else:
@@ -507,11 +539,17 @@ def plan_extraction(
                     if key not in modules_to_save:
                         modules_to_save.append(key)
                     targets.extend(
-                        plan_module_to_save(model_ref, writer_task, wi, bias_wi)
+                        plan_module_to_save(model_ref, writer_task, wi, bias_wi, full_model_output)
                     )
                 if key not in warned_modules:
                     LOG.warning(message)
                     warned_modules.add(key)
+        elif full_model_output:
+            # If we are outputting a full model and this module wasn't selected for extraction,
+            # we must save it at full rank.
+            targets.extend(
+                plan_module_to_save(model_ref, writer_task, wi, bias_wi, full_model_output)
+            )
 
     save_tasks = [t for t in targets if isinstance(t, (SaveTensor, LoRAModuleSaveTask))]
     finalize = FinalizeModel(tensor_save_tasks=save_tasks, writer_task=writer_task)
@@ -532,6 +570,7 @@ def plan_lora_module(
     distribute_scale: bool = True,
     transpose: bool = False,
     sv_epsilon: float = 0,
+    full_model_output: bool = False,
 ) -> List[Task]:
     targets = []
     if base_model_ref:
@@ -555,6 +594,7 @@ def plan_lora_module(
             writer_task=writer_task,
             model_ref=model_ref,
             decomposition_task=decomp_task,
+            full_model_output=full_model_output,
         )
     )
     if bias_wi is not None:
@@ -568,7 +608,12 @@ def plan_lora_module(
             base_tensor=base_bias_load_task, model_tensor=model_bias_load_task
         )
         base_bias_name = bias_wi.name.removesuffix(".bias")
-        name_out = f"base_model.model.{base_bias_name}.lora_B.bias"
+        
+        if full_model_output:
+            name_out = f"{base_bias_name}.lora_B.bias"
+        else:
+            name_out = f"base_model.model.{base_bias_name}.lora_B.bias"
+            
         targets.append(
             SaveTensor(
                 tensor_name=name_out,
@@ -586,11 +631,18 @@ def plan_module_to_save(
     writer_task: TensorWriterTask,
     wi: WeightInfo,
     bias_wi: Optional[WeightInfo],
+    full_model_output: bool = False,
 ):
     save_tasks = []
     load_task = _wi_load(model_ref, wi)
+    
+    if full_model_output:
+        name_out = wi.name
+    else:
+        name_out = f"base_model.model.{wi.name}"
+        
     save_task = SaveTensor(
-        tensor_name=f"base_model.model.{wi.name}",
+        tensor_name=name_out,
         tensor_task=load_task,
         writer_task=writer_task,
         optional=wi.optional,
@@ -599,8 +651,14 @@ def plan_module_to_save(
     save_tasks.append(save_task)
     if bias_wi is not None:
         bias_load_task = _wi_load(model_ref, bias_wi)
+        
+        if full_model_output:
+            bias_name_out = bias_wi.name
+        else:
+            bias_name_out = f"base_model.model.{bias_wi.name}"
+            
         bias_save_task = SaveTensor(
-            tensor_name=f"base_model.model.{bias_wi.name}",
+            tensor_name=bias_name_out,
             tensor_task=bias_load_task,
             writer_task=writer_task,
             optional=bias_wi.optional,
