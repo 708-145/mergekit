@@ -30,12 +30,12 @@ LOG = logging.getLogger("extract_lora")
 @click.command("mergekit-extract-lora", cls=PrettyPrintHelp)
 @click.option(
     "--model",
-    required=True,
+    required=False,
     help="Fine-tuned model path",
 )
 @click.option(
     "--base-model",
-    required=True,
+    required=False,
     help="Base model path",
 )
 @click.option(
@@ -98,10 +98,20 @@ LOG = logging.getLogger("extract_lora")
     help="Skip saving undecomposable modules",
     default=False,
 )
+@click.option(
+    "--decompose-full",
+    "decompose_full",
+    type=str,
+    multiple=True,
+    required=False,
+    is_flag=False,
+    flag_value="ALL",
+    help="Decompose the specified module(s) into full rank A and B matrices",
+)
 @add_merge_options
 def main(
-    base_model: str,
-    model: str,
+    base_model: Optional[str],
+    model: Optional[str],
     out_path: str,
     max_rank: int,
     distribute_scale: bool,
@@ -111,27 +121,46 @@ def main(
     include_regexes: List[str],
     sv_epsilon: float,
     skip_undecomposable: bool,
+    decompose_full: List[str],
     merge_options: MergeOptions,
 ):
     merge_options.apply_global_options()
 
+    if model is None and base_model is None:
+        raise click.UsageError(
+            "At least one of --model or --base-model must be provided."
+        )
+
+    # Handle single model decomposition
+    if model is None:
+        model = base_model
+        base_model = None
+
     if not modules_to_save:
         modules_to_save = []
+    if not decompose_full:
+        decompose_full = []
 
-    base_model_ref = ModelReference.model_validate(base_model)
-    model_ref = ModelReference.model_validate(model)
+    if base_model:
+        base_model_ref = ModelReference.model_validate(base_model).merged(
+            cache_dir=merge_options.lora_merge_cache,
+            trust_remote_code=merge_options.trust_remote_code,
+            lora_merge_dtype=merge_options.lora_merge_dtype,
+        )
+    else:
+        base_model_ref = None
+
+    model_ref = ModelReference.model_validate(model).merged(
+        cache_dir=merge_options.lora_merge_cache,
+        trust_remote_code=merge_options.trust_remote_code,
+        lora_merge_dtype=merge_options.lora_merge_dtype,
+    )
+
     plan_result = plan_extraction(
-        base_model_ref=base_model_ref.merged(
-            cache_dir=merge_options.lora_merge_cache,
-            trust_remote_code=merge_options.trust_remote_code,
-            lora_merge_dtype=merge_options.lora_merge_dtype,
-        ),
-        model_ref=model_ref.merged(
-            cache_dir=merge_options.lora_merge_cache,
-            trust_remote_code=merge_options.trust_remote_code,
-            lora_merge_dtype=merge_options.lora_merge_dtype,
-        ),
+        base_model_ref=base_model_ref,
+        model_ref=model_ref,
         modules_to_save=modules_to_save,
+        decompose_full=decompose_full,
         out_path=out_path,
         options=merge_options,
         max_rank=max_rank,
@@ -164,9 +193,10 @@ def main(
                 0
             ].shape[0]
 
-    real_max_rank = max(module_real_ranks.values())
+    real_max_rank = max(module_real_ranks.values()) if module_real_ranks else max_rank
     config_dict = make_config_dict(
         base_ref=base_model_ref,
+        model_ref=model_ref,
         max_rank=real_max_rank,
         modules_to_save=modules_to_save,
         target_modules=list(
@@ -181,7 +211,7 @@ def main(
     with open(os.path.join(out_path, "README.md"), "w", encoding="utf-8") as f:
         f.write(
             generate_card_lora(
-                base_model_ref,
+                base_model_ref or model_ref,
                 model_ref,
                 invocation,
                 os.path.basename(out_path),
@@ -194,7 +224,8 @@ def main(
 
 
 def make_config_dict(
-    base_ref: ModelReference,
+    base_ref: Optional[ModelReference],
+    model_ref: ModelReference,
     max_rank: int,
     modules_to_save: List[str],
     target_modules: List[str],
@@ -202,7 +233,7 @@ def make_config_dict(
 ):
     different_ranked = {k: v for k, v in module_ranks.items() if v != max_rank}
     return {
-        "base_model_name_or_path": base_ref.model.path,
+        "base_model_name_or_path": base_ref.model.path if base_ref else model_ref.model.path,
         "peft_type": "LORA",
         "use_rslora": False,
         "target_modules": target_modules,
@@ -260,19 +291,23 @@ class TaskVectorDecompositionTask(Task[Tuple[torch.Tensor, torch.Tensor]]):
 
 
 class TaskVectorTask(Task[torch.Tensor]):
-    base_tensor: Task
+    base_tensor: Optional[Task]
     model_tensor: Task
 
     def arguments(self) -> Dict[str, Any]:
-        return {"base": self.base_tensor, "model": self.model_tensor}
+        args = {"model": self.model_tensor}
+        if self.base_tensor:
+            args["base"] = self.base_tensor
+        return args
 
-    def execute(self, base: torch.Tensor, model: torch.Tensor) -> torch.Tensor:
+    def execute(self, model: torch.Tensor, base: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if base is None:
+            return model
         return model - base
 
     def group_label(self):
-        return max(
-            self.base_tensor.group_label() or "", self.model_tensor.group_label() or ""
-        )
+        base_lbl = self.base_tensor.group_label() if self.base_tensor else ""
+        return max(base_lbl or "", self.model_tensor.group_label() or "")
 
     def uses_accelerator(self):
         return True
@@ -346,7 +381,7 @@ class PlanResults(BaseModel):
 
 
 def plan_extraction(
-    base_model_ref: ModelReference,
+    base_model_ref: Optional[ModelReference],
     model_ref: ModelReference,
     modules_to_save: List[str],
     out_path: str,
@@ -358,6 +393,7 @@ def plan_extraction(
     include_regexes: Optional[List[str]] = None,
     sv_epsilon: float = 0,
     skip_undecomposable: bool = False,
+    decompose_full: List[str] = [],
 ) -> PlanResults:
     targets = []
     writer_task = TensorWriterTask(
@@ -370,21 +406,26 @@ def plan_extraction(
     )
 
     name_to_wi = all_weights_map(model_ref, options)
-    dummy_base = _make_dummy_model(base_model_ref, options.trust_remote_code)
     dummy_model = _make_dummy_model(model_ref, options.trust_remote_code)
+
+    if base_model_ref:
+        dummy_base = _make_dummy_model(base_model_ref, options.trust_remote_code)
+        base_vocab = dummy_base.get_input_embeddings().weight.shape[0]
+        del dummy_base
+    else:
+        base_vocab = dummy_model.get_input_embeddings().weight.shape[0]
 
     embed_in = dummy_model.get_input_embeddings()
     embed_out = dummy_model.get_output_embeddings()
 
     ft_vocab = embed_in.weight.shape[0]
-    base_vocab = dummy_base.get_input_embeddings().weight.shape[0]
+    
     if ft_vocab != base_vocab and embed_lora:
         LOG.warning(
             f"Vocabulary size mismatch: fine-tuned model has {ft_vocab} tokens, base model has {base_vocab} tokens"
         )
         LOG.warning("Enforcing embeddings in modules_to_save, embed_lora=False")
         embed_lora = False
-    del dummy_base
 
     warned_modules = set()
 
@@ -434,7 +475,14 @@ def plan_extraction(
             targets.extend(plan_module_to_save(model_ref, writer_task, wi, bias_wi))
         elif _should_extract(name):
             if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Embedding)):
-                LOG.info(f"Planning LoRA extraction for {name}")
+                module_max_rank = max_rank
+                key = name.split(".")[-1]
+                if "ALL" in decompose_full or name in decompose_full or key in decompose_full:
+                    module_max_rank = 1000000000
+                    LOG.info(f"Planning full-rank decomposition for {name}")
+                else:
+                    LOG.info(f"Planning LoRA extraction for {name}")
+
                 targets.extend(
                     plan_lora_module(
                         base_model_ref,
@@ -442,7 +490,7 @@ def plan_extraction(
                         wi,
                         bias_wi,
                         writer_task,
-                        max_rank,
+                        module_max_rank,
                         distribute_scale,
                         transpose=isinstance(module, nn.Embedding),
                         sv_epsilon=sv_epsilon,
@@ -475,7 +523,7 @@ def plan_extraction(
 
 
 def plan_lora_module(
-    base_model_ref: ModelReference,
+    base_model_ref: Optional[ModelReference],
     model_ref: ModelReference,
     wi: WeightInfo,
     bias_wi: Optional[WeightInfo],
@@ -486,7 +534,10 @@ def plan_lora_module(
     sv_epsilon: float = 0,
 ) -> List[Task]:
     targets = []
-    base_load_task = _wi_load(base_model_ref, wi)
+    if base_model_ref:
+        base_load_task = _wi_load(base_model_ref, wi)
+    else:
+        base_load_task = None
     model_load_task = _wi_load(model_ref, wi)
     tv_task = TaskVectorTask(base_tensor=base_load_task, model_tensor=model_load_task)
     decomp_task = TaskVectorDecompositionTask(
@@ -507,7 +558,11 @@ def plan_lora_module(
         )
     )
     if bias_wi is not None:
-        base_bias_load_task = _wi_load(base_model_ref, bias_wi)
+        if base_model_ref:
+            base_bias_load_task = _wi_load(base_model_ref, bias_wi)
+        else:
+            base_bias_load_task = None
+            
         model_bias_load_task = _wi_load(model_ref, bias_wi)
         tv_bias_task = TaskVectorTask(
             base_tensor=base_bias_load_task, model_tensor=model_bias_load_task
