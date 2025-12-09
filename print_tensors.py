@@ -1,7 +1,8 @@
 import argparse
 import sys
+import os
 import torch
-from mergekit.io.lazy_tensor_loader import LazyTensorLoader
+from mergekit.io.lazy_tensor_loader import LazyTensorLoader, ShardedTensorIndex
 
 def main():
     parser = argparse.ArgumentParser(description="Print all tensors with details for a model directory.")
@@ -9,7 +10,11 @@ def main():
     args = parser.parse_args()
 
     try:
-        loader = LazyTensorLoader.from_disk(args.model_path)
+        if os.path.isfile(args.model_path):
+            index = ShardedTensorIndex.from_file(args.model_path)
+        else:
+            index = ShardedTensorIndex.from_disk(args.model_path)
+        loader = LazyTensorLoader(index)
     except Exception as e:
         print(f"Error loading model from {args.model_path}: {e}")
         sys.exit(1)
