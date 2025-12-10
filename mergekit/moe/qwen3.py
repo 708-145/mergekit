@@ -110,17 +110,11 @@ class Qwen3MoE(MoEOutputArchitecture):
                         clone=merge_options.clone_tensors,
                     )
             else:
-                tensor = base_loader.get_tensor(
-                    tensor_name,
-                    aliases=weight_info.aliases,
-                    raise_on_missing=not weight_info.optional,
-                )
-                if tensor is None:
-                    continue
-
-                writer.save_tensor(
-                    tensor_name,
-                    tensor.to(dtype=out_dtype),
+                copy_tensor_out(
+                    weight_info,
+                    base_loader,
+                    writer,
+                    out_dtype=out_dtype,
                     clone=merge_options.clone_tensors,
                 )
 
