@@ -46,8 +46,8 @@ LOG = logging.getLogger("extract_lora")
 @click.option(
     "--max-rank",
     type=int,
-    default=128,
-    help="Maximum rank for LoRA decomposition",
+    default=None,
+    help="Maximum rank for LoRA decomposition [default: 128]",
 )
 @click.option(
     "--distribute-scale/--no-distribute-scale",
@@ -99,14 +99,14 @@ LOG = logging.getLogger("extract_lora")
     default=False,
 )
 @click.option(
-    "--decompose-full",
-    "decompose_full",
+    "--decompose-base",
+    "decompose_base",
     type=str,
     multiple=True,
     required=False,
     is_flag=False,
     flag_value="ALL",
-    help="Decompose the specified module(s) into full rank A and B matrices",
+    help="Decompose the specified module(s) of the model into LoRA matrices",
 )
 @click.option(
     "--full-model-output/--no-full-model-output",
@@ -119,7 +119,7 @@ def main(
     base_model: Optional[str],
     model: Optional[str],
     out_path: str,
-    max_rank: int,
+    max_rank: Optional[int],
     distribute_scale: bool,
     embed_lora: bool,
     modules_to_save: List[str],
@@ -127,11 +127,15 @@ def main(
     include_regexes: List[str],
     sv_epsilon: float,
     skip_undecomposable: bool,
-    decompose_full: List[str],
+    decompose_base: List[str],
     full_model_output: bool,
     merge_options: MergeOptions,
 ):
     merge_options.apply_global_options()
+    
+    force_rank_limit = max_rank is not None
+    if max_rank is None:
+        max_rank = 128
 
     if model is None and base_model is None:
         raise click.UsageError(
@@ -145,10 +149,12 @@ def main(
 
     if not modules_to_save:
         modules_to_save = []
-    if not decompose_full:
-        decompose_full = []
+    if not decompose_base:
+        decompose_base = []
 
     if base_model:
+        if decompose_base:
+             LOG.warning("--decompose-base used with two models; decomposing the difference")
         base_model_ref = ModelReference.model_validate(base_model).merged(
             cache_dir=merge_options.lora_merge_cache,
             trust_remote_code=merge_options.trust_remote_code,
@@ -167,10 +173,11 @@ def main(
         base_model_ref=base_model_ref,
         model_ref=model_ref,
         modules_to_save=modules_to_save,
-        decompose_full=decompose_full,
+        decompose_base=decompose_base,
         out_path=out_path,
         options=merge_options,
         max_rank=max_rank,
+        force_rank_limit=force_rank_limit,
         distribute_scale=distribute_scale,
         embed_lora=embed_lora,
         exclude_regexes=exclude_regexes,
@@ -200,6 +207,17 @@ def main(
             module_real_ranks[task.weight_info.name.removesuffix(".weight")] = result[
                 0
             ].shape[0]
+
+    if module_real_ranks:
+        ranks = list(module_real_ranks.values())
+        unique_ranks = sorted(list(set(ranks)))
+        if len(unique_ranks) == 1:
+            click.echo(f"All extracted modules used rank: {unique_ranks[0]}")
+        else:
+            click.echo(
+                f"Extracted modules used ranks: min={min(ranks)}, "
+                f"max={max(ranks)}, unique={unique_ranks}"
+            )
 
     if not full_model_output:
         real_max_rank = max(module_real_ranks.values()) if module_real_ranks else max_rank
@@ -417,13 +435,14 @@ def plan_extraction(
     out_path: str,
     options: MergeOptions,
     max_rank: int,
+    force_rank_limit: bool = False,
     distribute_scale: bool = True,
     embed_lora: bool = False,
     exclude_regexes: Optional[List[str]] = None,
     include_regexes: Optional[List[str]] = None,
     sv_epsilon: float = 0,
     skip_undecomposable: bool = False,
-    decompose_full: List[str] = [],
+    decompose_base: List[str] = [],
     full_model_output: bool = False,
 ) -> PlanResults:
     targets = []
@@ -508,9 +527,13 @@ def plan_extraction(
             if isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, nn.Embedding)):
                 module_max_rank = max_rank
                 key = name.split(".")[-1]
-                if "ALL" in decompose_full or name in decompose_full or key in decompose_full:
-                    module_max_rank = 1000000000
-                    LOG.info(f"Planning full-rank decomposition for {name}")
+                if "ALL" in decompose_base or name in decompose_base or key in decompose_base:
+                    if force_rank_limit:
+                        module_max_rank = max_rank
+                        LOG.info(f"Using specified max_rank {max_rank} for {name} (decompose-base)")
+                    else:
+                        module_max_rank = 1000000000
+                        LOG.info(f"Planning full-rank decomposition for {name} (decompose-base)")
                 else:
                     LOG.info(f"Planning LoRA extraction for {name}")
 
