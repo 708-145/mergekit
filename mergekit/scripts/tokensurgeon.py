@@ -17,6 +17,7 @@ from mergekit.architecture import (
     WeightInfo,
     arch_info_for_config,
 )
+from mergekit.architecture.auto import infer_architecture_info
 from mergekit.common import ModelReference, set_config_value
 from mergekit.io.tasks import (
     LoaderCache,
@@ -98,6 +99,12 @@ def get_arch_info(
 ) -> ConfiguredModelArchitecture:
     cfg = model.config(trust_remote_code=options.trust_remote_code)
     arch_info = arch_info_for_config(cfg)
+    if arch_info is None:
+        LOG.warning(
+            f"Architecture {cfg.architectures[0]} not found in registry. "
+            "Attempting to infer architecture from model structure."
+        )
+        arch_info = infer_architecture_info((model,), None, options)
     return ConfiguredModelArchitecture(info=arch_info, config=cfg)
 
 

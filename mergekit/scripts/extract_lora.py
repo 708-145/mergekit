@@ -16,6 +16,7 @@ import transformers
 from pydantic import BaseModel
 
 from mergekit.architecture import WeightInfo, arch_info_for_config
+from mergekit.architecture.auto import infer_architecture_info
 from mergekit.card import generate_card_lora
 from mergekit.common import ModelReference, get_auto_cls
 from mergekit.graph import Executor, Task
@@ -697,6 +698,14 @@ def all_weights_map(
     name_to_wi = {}
     model_cfg = model_ref.config(trust_remote_code=options.trust_remote_code)
     arch_info = arch_info_for_config(model_cfg)
+
+    if arch_info is None:
+        LOG.warning(
+            f"Architecture {model_cfg.architectures[0]} not found in registry. "
+            "Attempting to infer architecture from model structure."
+        )
+        arch_info = infer_architecture_info((model_ref,), None, options)
+
     for wi in arch_info.all_weights(model_cfg):
         name_to_wi[wi.name] = wi
     return name_to_wi

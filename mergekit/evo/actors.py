@@ -26,6 +26,7 @@ except ImportError:
 
 
 from mergekit.architecture import arch_info_for_config
+from mergekit.architecture.auto import infer_architecture_info
 from mergekit.common import get_torch_accelerator_module, get_torch_accelerator_type
 from mergekit.config import MergeConfiguration
 from mergekit.evo.config import EvolMergeConfiguration
@@ -149,6 +150,17 @@ class InMemoryMergeEvaluator(MergeActorBase):
 
     def _maybe_init_model(self, config: MergeConfiguration):
         ai = arch_info_for_config(self.genome._input_config_example)
+        if ai is None:
+            LOG.warning(
+                f"Architecture {self.genome._input_config_example.architectures[0]} not found in registry. "
+                "Attempting to infer architecture from model structure."
+            )
+            ai = infer_architecture_info(
+                tuple(self.genome.definition.models),
+                self.genome.definition.base_model,
+                self.merge_options,
+            )
+
         cfg_out = _model_out_config(
             config,
             ai,

@@ -11,6 +11,7 @@ import tqdm
 import transformers
 
 from mergekit.architecture import arch_info_for_config
+from mergekit.architecture.auto import infer_architecture_info
 from mergekit.moe.arch import MoEOutputArchitecture
 from mergekit.moe.common import copy_tensor_out, initialize_io, select_dtype
 from mergekit.moe.config import MoEMergeConfig
@@ -125,8 +126,17 @@ class DeepseekMoE(MoEOutputArchitecture):
 
         loaders, base_loader, writer = initialize_io(config, out_path, merge_options)
         shared_loader = loaders.get(shared_def.source_model) if shared_def else None
+
+        arch_info = arch_info_for_config(base_cfg)
+        if arch_info is None:
+            logging.warning(
+                f"Architecture {base_cfg.architectures[0]} not found in registry. "
+                "Attempting to infer architecture from model structure."
+            )
+            arch_info = infer_architecture_info((base_model,), None, merge_options)
+
         for weight_info in tqdm.tqdm(
-            arch_info_for_config(base_cfg).all_weights(base_cfg),
+            arch_info.all_weights(base_cfg),
             desc="Weights",
         ):
             tensor_name = weight_info.name

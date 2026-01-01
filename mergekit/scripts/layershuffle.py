@@ -8,6 +8,7 @@ import click
 import yaml
 
 from mergekit.architecture import arch_info_for_config
+from mergekit.architecture.auto import infer_architecture_info
 from mergekit.common import ModelReference
 from mergekit.config import (
     InputSliceDefinition,
@@ -65,6 +66,18 @@ def main(
 
     m0_cfg = models[0].config()
     arch_info = arch_info_for_config(m0_cfg)
+    if arch_info is None:
+        print(
+            f"Architecture {m0_cfg.architectures[0]} not found in registry. "
+            "Attempting to infer architecture from model structure."
+        )
+        # hack: construct options object
+        from mergekit.options import MergeOptions
+
+        arch_info = infer_architecture_info(
+            (models[0],), None, merge_options or MergeOptions()
+        )
+
     total_num_layers = arch_info.num_layers(m0_cfg)
 
     out_slices: List[OutputSliceDefinition] = []
