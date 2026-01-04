@@ -89,6 +89,82 @@ def copy_tensor_out(
     except KeyError:
         tensor = None
     if tensor is None:
+        # Check for suffixed keys (e.g. exl2/3 weights)
+        candidates = [weight_info.name] + aliases
+        found_suffixed = False
+        for candidate in candidates:
+            # Check for keys appended to the weight name (e.g. weight.q_weight)
+            prefix = candidate + "."
+            suffixed_keys = [
+                k for k in loader.index.tensor_paths if k.startswith(prefix)
+            ]
+            if suffixed_keys:
+                found_suffixed = True
+                for key in suffixed_keys:
+                    suffix = key[len(candidate) :]
+                    try:
+                        sub_tensor = loader.get_tensor(key)
+                        sub_out_name = out_tensor_name + suffix
+                        writer.save_tensor(
+                            sub_out_name,
+                            sub_tensor,
+                            clone=clone,
+                        )
+                    except KeyError:
+                        continue
+                break
+
+            # Check for keys replacing .weight (e.g. .q_weight)
+            # Only if the candidate ends with .weight
+            if candidate.endswith(".weight"):
+                base_name = candidate[: -len("weight")]
+                prefix = base_name
+                suffixed_keys = [
+                    k for k in loader.index.tensor_paths if k.startswith(prefix)
+                ]
+
+                # Filter out keys that are likely other parameters (like .bias)
+                # We only want suffixes that start with something indicating a weight split/quantization
+                # Or just exclude known non-weight parameters.
+                # Since we don't know all parameters, a safer bet is to rely on what exl2 usually does?
+                # But here we just exclude .bias if it matches exactly?
+                # Actually, if we match prefix "linear.", we match "linear.bias".
+                valid_keys = []
+                for k in suffixed_keys:
+                    suffix = k[len(prefix) :]
+                    # Skip bias if it's found (bias is usually a separate WeightInfo)
+                    if suffix == "bias":
+                        continue
+                    # Skip if it is exactly the prefix (unlikely given startswith check logic but possible if prefix matches full key)
+                    if not suffix:
+                        continue
+                    valid_keys.append(k)
+
+                if valid_keys:
+                    found_suffixed = True
+                    # If we are replacing .weight in input, we should probably replace it in output too?
+                    # out_tensor_name usually ends in .weight too.
+                    out_base = out_tensor_name
+                    if out_base.endswith(".weight"):
+                         out_base = out_base[: -len("weight")]
+
+                    for key in valid_keys:
+                        suffix = key[len(prefix) :]
+                        try:
+                            sub_tensor = loader.get_tensor(key)
+                            sub_out_name = out_base + suffix
+                            writer.save_tensor(
+                                sub_out_name,
+                                sub_tensor,
+                                clone=clone,
+                            )
+                        except KeyError:
+                            continue
+                    break
+
+        if found_suffixed:
+            return
+
         if weight_info.optional:
             return
         logging.error(f"Missing weight: {weight_info.name} / {out_tensor_name}")

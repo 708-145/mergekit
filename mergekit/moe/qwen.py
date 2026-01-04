@@ -150,8 +150,12 @@ class QwenMoE(MoEOutputArchitecture):
                 )
             else:
                 try:
-                    tensor = base_loader.get_tensor(
-                        tensor_name, aliases=weight_info.aliases
+                    copy_tensor_out(
+                        weight_info,
+                        base_loader,
+                        writer,
+                        out_dtype=out_dtype,
+                        clone=merge_options.clone_tensors,
                     )
                 except KeyError:
                     if tensor_name.endswith("_proj.bias"):
@@ -166,16 +170,13 @@ class QwenMoE(MoEOutputArchitecture):
                             else out_cfg.num_attention_heads
                         )
                         tensor = torch.zeros(num_heads * head_dim, dtype=out_dtype)
-                    elif weight_info.optional:
-                        continue
+                        writer.save_tensor(
+                            tensor_name,
+                            tensor.to(dtype=out_dtype),
+                            clone=merge_options.clone_tensors,
+                        )
                     else:
                         raise
-
-                writer.save_tensor(
-                    tensor_name,
-                    tensor.to(dtype=out_dtype),
-                    clone=merge_options.clone_tensors,
-                )
 
         for layer_idx, weight in enumerate(
             tqdm.tqdm(router_weights, desc="Router weights")
